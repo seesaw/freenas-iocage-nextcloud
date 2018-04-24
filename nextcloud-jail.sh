@@ -23,6 +23,10 @@ PORTS_PATH=""
 STANDALONE_CERT=0
 DNS_CERT=0
 TEST_CERT="--test"
+APACHE_SERVER=0
+NGINX_SERVER=0
+WEBROOT_PATH=""
+NEXTCLOUD_PATH=""
 
 SCRIPT=$(readlink -f "$0")
 SCRIPTPATH=$(dirname "$SCRIPT")
@@ -74,6 +78,18 @@ if [ $DNS_CERT -eq 1 ] && ! [ -x $CONFIGS_PATH/acme_dns_issue.sh ]; then
   exit 1
 fi
 
+if [ $NGINX_SERVER -eq 0 ] && [ $APACHE_SERVER -eq 0 ]; then
+  echo 'Configuration error: Either NGINX_CERT or APACHE_SERVER'
+  echo 'must be set to 1.'
+  exit 1
+fi
+if [ -z $WEBROOT_PATH ]; then
+  WEBROOT_PATH="/usr/local/www"
+fi
+if [ -z $NEXTCLOUD_PATH ]; then
+  NEXTCLOUD_PATH="$WEBROOT_PATH/nextcloud"
+fi
+
 # If DB_PATH, FILES_PATH, and PORTS_PATH weren't set in nextcloud-config, set them
 if [ -z $DB_PATH ]; then
   DB_PATH="${POOL_PATH}/db"
@@ -107,11 +123,10 @@ if [ "$(ls -A $DB_PATH)" ]; then
   exit 1
 fi
 
-
 cat <<__EOF__ >/tmp/pkg.json
 {
   "pkgs":[
-  "nano","curl","sudo","mariadb101-server","redis","php72-ctype",
+  "nano","curl","sudo","mariadb102-server","redis","php72-ctype",
   "php72-dom","php72-gd","php72-iconv","php72-json","php72-mbstring",
   "php72-posix","php72-simplexml","php72-xmlreader","php72-xmlwriter",
   "php72-zip","php72-zlib","php72-pdo_mysql","php72-hash","php72-xml",
@@ -139,17 +154,23 @@ iocage exec ${JAIL_NAME} mkdir -p /mnt/configs
 iocage fstab -a ${JAIL_NAME} ${PORTS_PATH}/ports /usr/ports nullfs rw 0 0
 iocage fstab -a ${JAIL_NAME} ${PORTS_PATH}/db /var/db/portsnap nullfs rw 0 0
 iocage fstab -a ${JAIL_NAME} ${FILES_PATH} /mnt/files nullfs rw 0 0
-iocage fstab -a ${JAIL_NAME} ${DB_PATH}  /var/db/mysql  nullfs  rw  0  0
-iocage fstab -a ${JAIL_NAME} ${CONFIGS_PATH} /mnt/configs nullfs rw 0 0
+iocage fstab -a ${JAIL_NAME} ${DB_PATH} /var/db/mysql nullfs rw 0 0
+iocage fstab -a ${JAIL_NAME} ${CONFIGS_PATH} /mnt/configs nullfs ro 0 0
 iocage exec ${JAIL_NAME} chown -R www:www /mnt/files
 iocage exec ${JAIL_NAME} chmod -R 770 /mnt/files
 iocage exec ${JAIL_NAME} "if [ -z /usr/ports ]; then portsnap fetch extract; else portsnap auto; fi"
 iocage exec ${JAIL_NAME} chsh -s /usr/local/bin/bash root
-iocage exec ${JAIL_NAME} make -C /usr/ports/www/apache24 clean install BATCH=yes
+if [ $APACHE_SERVER -eq 1 ]; then
+  iocage exec ${JAIL_NAME} make -C /usr/ports/www/apache24 clean install BATCH=yes
+  iocage exec ${JAIL_NAME} sysrc apache24_enable="YES"
+elif [ $NGINX_SERVER -eq 1 ]; then
+  iocage exec ${JAIL_NAME} make -C /usr/ports/www/nginx clean install BATCH=yes
+  iocage exec ${JAIL_NAME} sysrc nginx_enable="YES"
+fi
 iocage exec ${JAIL_NAME} fetch -o /tmp https://download.nextcloud.com/server/releases/latest-13.tar.bz2
-iocage exec ${JAIL_NAME} tar xjf /tmp/latest-13.tar.bz2 -C /usr/local/www/apache24/data/
-iocage exec ${JAIL_NAME} chown -R www:www /usr/local/www/apache24/data/nextcloud/
-iocage exec ${JAIL_NAME} sysrc apache24_enable="YES"
+iocage exec ${JAIL_NAME} "mkdir ${NEXTCLOUD_PATH}"
+iocage exec ${JAIL_NAME} "tar xjf /tmp/latest-13.tar.bz2 --strip 1 -C ${NEXTCLOUD_PATH}"
+iocage exec ${JAIL_NAME} "chown -R www:www ${NEXTCLOUD_PATH}"
 iocage exec ${JAIL_NAME} sysrc mysql_enable="YES"
 iocage exec ${JAIL_NAME} sysrc redis_enable="YES"
 iocage exec ${JAIL_NAME} sysrc php_fpm_enable="YES"
@@ -171,16 +192,28 @@ elif [ $DNS_CERT -eq 1 ]; then
 fi
 
 # Copy and edit pre-written config files
-iocage exec ${JAIL_NAME} cp -f /mnt/configs/httpd.conf /usr/local/etc/apache24/httpd.conf
+if [ $APACHE_SERVER -eq 1 ]; then
+  iocage exec ${JAIL_NAME} cp -f /mnt/configs/apache/httpd.conf /usr/local/etc/apache24/httpd.conf
+  iocage exec ${JAIL_NAME} cp -f /mnt/configs/apache/001_mod_php.conf /usr/local/etc/apache24/modules.d/001_mod_php.conf
+  iocage exec ${JAIL_NAME} cp -f /mnt/configs/apache/nextcloud.conf /usr/local/etc/apache24/Includes/${HOST_NAME}.conf
+  iocage exec ${JAIL_NAME} sed -i '' "s/yourhostnamehere/${HOST_NAME}/" /usr/local/etc/apache24/httpd.conf
+  iocage exec ${JAIL_NAME} sed -i '' "s/yourhostnamehere/${HOST_NAME}/" /usr/local/etc/apache24/Includes/${HOST_NAME}.conf
+  iocage exec ${JAIL_NAME} sed -i '' "s/jailiphere/${JAIL_IP}/" /usr/local/etc/apache24/Includes/${HOST_NAME}.conf
+  iocage exec ${JAIL_NAME} sed -i '' "s|yourwebrootpathere|${WEBROOT_PATH}|" /usr/local/etc/apache24/Includes/${HOST_NAME}.conf
+  iocage exec ${JAIL_NAME} sed -i '' "s|yournextcloudpathere|${NEXTCLOUD_PATH}|" /usr/local/etc/apache24/Includes/${HOST_NAME}.conf
+elif [ $NGINX_SERVER -eq 1 ]; then
+  iocage exec ${JAIL_NAME} cp -f /mnt/configs/nginx/nginx.conf /usr/local/etc/nginx/nginx.conf
+  iocage exec ${JAIL_NAME} mkdir /usr/local/etc/nginx/conf.d
+  iocage exec ${JAIL_NAME} cp -f /mnt/configs/nginx/nextcloud.conf /usr/local/etc/nginx/conf.d/${HOST_NAME}.conf
+  iocage exec ${JAIL_NAME} sed -i '' "s/yourhostnamehere/${HOST_NAME}/" /usr/local/etc/nginx/conf.d/${HOST_NAME}.conf
+  iocage exec ${JAIL_NAME} sed -i '' "s/jailiphere/${JAIL_IP}/" /usr/local/etc/nginx/conf.d/${HOST_NAME}.conf
+  iocage exec ${JAIL_NAME} sed -i '' "s|yourwebrootpathere|${WEBROOT_PATH}|" /usr/local/etc/nginx/conf.d/${HOST_NAME}.conf
+  iocage exec ${JAIL_NAME} sed -i '' "s|yournextcloudpathere|${NEXTCLOUD_PATH}|" /usr/local/etc/nginx/conf.d/${HOST_NAME}.conf
+fi
 iocage exec ${JAIL_NAME} cp -f /mnt/configs/php.ini /usr/local/etc/php.ini
 iocage exec ${JAIL_NAME} cp -f /mnt/configs/redis.conf /usr/local/etc/redis.conf
-iocage exec ${JAIL_NAME} cp -f /mnt/configs/001_mod_php.conf /usr/local/etc/apache24/modules.d/001_mod_php.conf
-iocage exec ${JAIL_NAME} cp -f /mnt/configs/nextcloud.conf /usr/local/etc/apache24/Includes/${HOST_NAME}.conf
 iocage exec ${JAIL_NAME} cp -f /mnt/configs/www.conf /usr/local/etc/php-fpm.d/
 iocage exec ${JAIL_NAME} cp -f /usr/local/share/mysql/my-small.cnf /var/db/mysql/my.cnf
-iocage exec ${JAIL_NAME} sed -i '' "s/yourhostnamehere/${HOST_NAME}/" /usr/local/etc/apache24/Includes/${HOST_NAME}.conf
-iocage exec ${JAIL_NAME} sed -i '' "s/jailiphere/${JAIL_IP}/" /usr/local/etc/apache24/Includes/${HOST_NAME}.conf
-iocage exec ${JAIL_NAME} sed -i '' "s/yourhostnamehere/${HOST_NAME}/" /usr/local/etc/apache24/httpd.conf
 iocage exec ${JAIL_NAME} sed -i '' "s/#skip-networking/skip-networking/" /var/db/mysql/my.cnf
 iocage exec ${JAIL_NAME} sed -i '' "s|mytimezone|${TIME_ZONE}|" /usr/local/etc/php.ini
 # iocage exec ${JAIL_NAME} openssl dhparam -out /usr/local/etc/pki/tls/private/dhparams_4096.pem 4096
@@ -205,34 +238,39 @@ iocage exec ${JAIL_NAME} echo "Nextcloud Administrator password is ${ADMIN_PASSW
 
 # If standalone mode was used to issue certificate, reissue using webroot
 if [ $STANDALONE_CERT -eq 1 ]; then
-  iocage exec ${JAIL_NAME} /root/.acme.sh/acme.sh --issue ${TEST_CERT} --home "/root/.acme.sh" -d ${HOST_NAME} -w /usr/local/www/apache24/data -k 4096 --fullchain-file /usr/local/etc/pki/tls/certs/fullchain.pem --key-file /usr/local/etc/pki/tls/private/privkey.pem --reloadcmd "service apache24 reload"
+  if [ $APACHE_SERVER -eq 1 ]; then
+    SERVICE_NAME='apache24'
+  elif [ $NGINX_SERVER -eq 1 ]; then
+    SERVICE_NAME='nginx'
+  fi
+  iocage exec ${JAIL_NAME} /root/.acme.sh/acme.sh --issue ${TEST_CERT} --home "/root/.acme.sh" -d ${HOST_NAME} -w ${WEBROOT_PATH} -k 4096 --fullchain-file /usr/local/etc/pki/tls/certs/fullchain.pem --key-file /usr/local/etc/pki/tls/private/privkey.pem --reloadcmd "service ${SERVICE_NAME} reload"
 fi
 
 # CLI installation and configuration of Nextcloud
 iocage exec ${JAIL_NAME} touch /var/log/nextcloud.log
 iocage exec ${JAIL_NAME} chown www /var/log/nextcloud.log
-iocage exec ${JAIL_NAME} su -m www -c "php /usr/local/www/apache24/data/nextcloud/occ maintenance:install --database=\"mysql\" --database-name=\"nextcloud\" --database-user=\"nextcloud\" --database-pass=\"${DB_PASSWORD}\" --database-host=\"localhost:/tmp/mysql.sock\" --admin-user=\"admin\" --admin-pass=\"${ADMIN_PASSWORD}\" --data-dir=\"/mnt/files\""
-iocage exec ${JAIL_NAME} su -m www -c "php /usr/local/www/apache24/data/nextcloud/occ config:system:set logtimezone --value=\"${TIME_ZONE}\""
-iocage exec ${JAIL_NAME} su -m www -c 'php /usr/local/www/apache24/data/nextcloud/occ config:system:set log_type --value="file"'
-iocage exec ${JAIL_NAME} su -m www -c 'php /usr/local/www/apache24/data/nextcloud/occ config:system:set logfile --value="/var/log/nextcloud.log"'
-iocage exec ${JAIL_NAME} su -m www -c 'php /usr/local/www/apache24/data/nextcloud/occ config:system:set loglevel --value="2"'
-iocage exec ${JAIL_NAME} su -m www -c 'php /usr/local/www/apache24/data/nextcloud/occ config:system:set logrotate_size --value="104847600"'
-iocage exec ${JAIL_NAME} su -m www -c 'php /usr/local/www/apache24/data/nextcloud/occ config:system:set memcache.local --value="\OC\Memcache\APCu"'
-iocage exec ${JAIL_NAME} su -m www -c 'php /usr/local/www/apache24/data/nextcloud/occ config:system:set memcache.locking --value="\OC\Memcache\Redis"'
-iocage exec ${JAIL_NAME} su -m www -c 'php /usr/local/www/apache24/data/nextcloud/occ config:system:set redis host --value="/tmp/redis.sock"'
-iocage exec ${JAIL_NAME} su -m www -c 'php /usr/local/www/apache24/data/nextcloud/occ config:system:set redis port --value=0 --type=integer'
-iocage exec ${JAIL_NAME} su -m www -c 'php /usr/local/www/apache24/data/nextcloud/occ config:system:set htaccess.RewriteBase --value="/"'
-iocage exec ${JAIL_NAME} su -m www -c 'php /usr/local/www/apache24/data/nextcloud/occ maintenance:update:htaccess'
-iocage exec ${JAIL_NAME} su -m www -c "php /usr/local/www/apache24/data/nextcloud/occ config:system:set trusted_domains 1 --value=\"${HOST_NAME}\""
-iocage exec ${JAIL_NAME} su -m www -c "php /usr/local/www/apache24/data/nextcloud/occ config:system:set trusted_domains 2 --value=\"${JAIL_IP}\""
-iocage exec ${JAIL_NAME} su -m www -c 'php /usr/local/www/apache24/data/nextcloud/occ app:enable encryption'
-iocage exec ${JAIL_NAME} su -m www -c 'php /usr/local/www/apache24/data/nextcloud/occ encryption:enable'
-iocage exec ${JAIL_NAME} su -m www -c 'php /usr/local/www/apache24/data/nextcloud/occ encryption:disable'
-iocage exec ${JAIL_NAME} su -m www -c 'php /usr/local/www/apache24/data/nextcloud/occ background:cron'
-iocage exec ${JAIL_NAME} crontab -u www /mnt/configs/www-crontab
+iocage exec ${JAIL_NAME} su -m www -c "php ${NEXTCLOUD_PATH}/occ maintenance:install --database='mysql' --database-name='nextcloud' --database-user='nextcloud' --database-pass='${DB_PASSWORD}' --database-host='localhost:/tmp/mysql.sock' --admin-user='admin' --admin-pass='${ADMIN_PASSWORD}' --data-dir='/mnt/files'"
+iocage exec ${JAIL_NAME} su -m www -c "php ${NEXTCLOUD_PATH}/occ config:system:set logtimezone --value=\"${TIME_ZONE}\""
+iocage exec ${JAIL_NAME} su -m www -c "php ${NEXTCLOUD_PATH}/occ config:system:set log_type --value=\"file\""
+iocage exec ${JAIL_NAME} su -m www -c "php ${NEXTCLOUD_PATH}/occ config:system:set logfile --value=\"/var/log/nextcloud.log\""
+iocage exec ${JAIL_NAME} su -m www -c "php ${NEXTCLOUD_PATH}/occ config:system:set loglevel --value=\"2\""
+iocage exec ${JAIL_NAME} su -m www -c "php ${NEXTCLOUD_PATH}/occ config:system:set logrotate_size --value=\"104847600\""
+iocage exec ${JAIL_NAME} su -m www -c "php ${NEXTCLOUD_PATH}/occ config:system:set memcache.local --value=\"\OC\Memcache\APCu\""
+iocage exec ${JAIL_NAME} su -m www -c "php ${NEXTCLOUD_PATH}/occ config:system:set memcache.locking --value=\"\OC\Memcache\Redis\""
+iocage exec ${JAIL_NAME} su -m www -c "php ${NEXTCLOUD_PATH}/occ config:system:set redis host --value=\"/tmp/redis.sock\""
+iocage exec ${JAIL_NAME} su -m www -c "php ${NEXTCLOUD_PATH}/occ config:system:set redis port --value=0 --type=integer"
+iocage exec ${JAIL_NAME} su -m www -c "php ${NEXTCLOUD_PATH}/occ config:system:set htaccess.RewriteBase --value=\"/\""
+iocage exec ${JAIL_NAME} su -m www -c "php ${NEXTCLOUD_PATH}/occ maintenance:update:htaccess"
+iocage exec ${JAIL_NAME} su -m www -c "php ${NEXTCLOUD_PATH}/occ config:system:set trusted_domains 1 --value=\"${HOST_NAME}\""
+iocage exec ${JAIL_NAME} su -m www -c "php ${NEXTCLOUD_PATH}/occ config:system:set trusted_domains 2 --value=\"${JAIL_IP}\""
+iocage exec ${JAIL_NAME} su -m www -c "php ${NEXTCLOUD_PATH}/occ app:enable encryption"
+iocage exec ${JAIL_NAME} su -m www -c "php ${NEXTCLOUD_PATH}/occ encryption:enable"
+iocage exec ${JAIL_NAME} su -m www -c "php ${NEXTCLOUD_PATH}/occ encryption:disable"
+iocage exec ${JAIL_NAME} su -m www -c "php ${NEXTCLOUD_PATH}/occ background:cron"
+iocage exec ${JAIL_NAME} cat /mnt/configs/www-crontab | envsubst | crontab -u www -
 
 # Don't need /mnt/configs any more, so unmount it
-iocage fstab -r ${JAIL_NAME} ${CONFIGS_PATH} /mnt/configs nullfs rw 0 0
+iocage fstab -r ${JAIL_NAME} ${CONFIGS_PATH} /mnt/configs nullfs ro 0 0
 
 # Done!
 echo "Installation complete!"
