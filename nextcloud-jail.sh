@@ -22,6 +22,8 @@ FILES_PATH=""
 PORTS_PATH=""
 STANDALONE_CERT=0
 DNS_CERT=0
+SELF_SIGNED_CERT=0
+SELF_SIGNED_PARAMS=""
 TEST_CERT="--test"
 APACHE_SERVER=0
 NGINX_SERVER=0
@@ -67,8 +69,8 @@ if [ -z $HOST_NAME ]; then
   echo 'Configuration error: HOST_NAME must be set'
   exit 1
 fi
-if [ $STANDALONE_CERT -eq 0 ] && [ $DNS_CERT -eq 0 ]; then
-  echo 'Configuration error: Either STANDALONE_CERT or DNS_CERT'
+if [ $STANDALONE_CERT -eq 0 ] && [ $DNS_CERT -eq 0 ] && [ $SELF_SIGNED_CERT -eq 0 ]; then
+  echo 'Configuration error: Either STANDALONE_CERT, DNS_CERT or SELF_SIGNED_CERT'
   echo 'must be set to 1.'
   exit 1
 fi
@@ -76,6 +78,9 @@ if [ $DNS_CERT -eq 1 ] && ! [ -x $CONFIGS_PATH/acme_dns_issue.sh ]; then
   echo 'If DNS_CERT is set to 1, configs/acme_dns_issue.sh must exist'
   echo 'and be executable.'
   exit 1
+fi
+if [ $SELF_SIGNED_CERT -eq 1 ] && [ -z $SELF_SIGNED_PARAMS ]; then
+  SELF_SIGNED_PARAMS="/CN=$HOST_NAME"
 fi
 
 if [ $NGINX_SERVER -eq 0 ] && [ $APACHE_SERVER -eq 0 ]; then
@@ -180,15 +185,22 @@ iocage exec ${JAIL_NAME} mkdir -p /usr/local/etc/pki/tls/certs/
 iocage exec ${JAIL_NAME} mkdir -p /usr/local/etc/pki/tls/private/
 iocage exec ${JAIL_NAME} touch /usr/local/etc/pki/tls/private/privkey.pem
 iocage exec ${JAIL_NAME} chmod 600 /usr/local/etc/pki/tls/private/privkey.pem
-iocage exec ${JAIL_NAME} curl https://get.acme.sh -o /tmp/get-acme.sh
-iocage exec ${JAIL_NAME} sh /tmp/get-acme.sh
-iocage exec ${JAIL_NAME} rm /tmp/get-acme.sh
+if [ $SELF_SIGNED_CERT -ne 1 ]; then
+  iocage exec ${JAIL_NAME} curl https://get.acme.sh -o /tmp/get-acme.sh
+  iocage exec ${JAIL_NAME} sh /tmp/get-acme.sh
+  iocage exec ${JAIL_NAME} rm /tmp/get-acme.sh
+fi
 
 # Issue certificate.  If standalone mode is selected, issue directly, otherwise call external script to issue cert via DNS validation
 if [ $STANDALONE_CERT -eq 1 ]; then
   iocage exec ${JAIL_NAME} /root/.acme.sh/acme.sh --issue ${TEST_CERT} --home "/root/.acme.sh" --standalone -d ${HOST_NAME} -k 4096 --fullchain-file /usr/local/etc/pki/tls/certs/fullchain.pem --key-file /usr/local/etc/pki/tls/private/privkey.pem
 elif [ $DNS_CERT -eq 1 ]; then
   iocage exec ${JAIL_NAME} /mnt/configs/acme_dns_issue.sh
+elif [ $SELF_SIGNED_CERT -eq 1 ]; then
+  iocage exec ${JAIL_NAME} openssl req -new -x509 -nodes -days 365 -newkey rsa:2048 \
+    -subj "${SELF_SIGNED_PARAMS}" \
+    -keyout /usr/local/etc/pki/tls/private/privkey.pem \
+    -out /usr/local/etc/pki/tls/certs/fullchain.pem
 fi
 
 # Copy and edit pre-written config files
@@ -216,7 +228,7 @@ iocage exec ${JAIL_NAME} cp -f /mnt/configs/www.conf /usr/local/etc/php-fpm.d/
 iocage exec ${JAIL_NAME} cp -f /usr/local/share/mysql/my-small.cnf /var/db/mysql/my.cnf
 iocage exec ${JAIL_NAME} sed -i '' "s/#skip-networking/skip-networking/" /var/db/mysql/my.cnf
 iocage exec ${JAIL_NAME} sed -i '' "s|mytimezone|${TIME_ZONE}|" /usr/local/etc/php.ini
-# iocage exec ${JAIL_NAME} openssl dhparam -out /usr/local/etc/pki/tls/private/dhparams_4096.pem 4096
+iocage exec ${JAIL_NAME} openssl dhparam -out /usr/local/etc/pki/tls/private/dhparams_2048.pem 2048
 iocage restart ${JAIL_NAME}
 
 # Secure database, set root password, create Nextcloud DB, user, and password
