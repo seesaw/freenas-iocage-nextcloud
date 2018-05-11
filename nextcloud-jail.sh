@@ -181,6 +181,7 @@ iocage exec ${JAIL_NAME} sysrc redis_enable="YES"
 iocage exec ${JAIL_NAME} sysrc php_fpm_enable="YES"
 iocage exec ${JAIL_NAME} make -C /usr/ports/databases/pecl-redis clean install BATCH=yes
 iocage exec ${JAIL_NAME} make -C /usr/ports/devel/pecl-APCu clean install BATCH=yes
+# iocage exec ${JAIL_NAME} make -C /usr/ports/graphics/pecl-imagick clean install BATCH=yes
 iocage exec ${JAIL_NAME} mkdir -p /usr/local/etc/pki/tls/certs/
 iocage exec ${JAIL_NAME} mkdir -p /usr/local/etc/pki/tls/private/
 iocage exec ${JAIL_NAME} touch /usr/local/etc/pki/tls/private/privkey.pem
